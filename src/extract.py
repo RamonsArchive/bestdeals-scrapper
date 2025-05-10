@@ -1,32 +1,9 @@
-# fetch browser async client proxies
 import json
 import scrapy
 from scrapy.crawler import CrawlerProcess
-from collections import deque
-from find_data import find_object
-# page source link: require":[["ScheduledServerJS","handle",null,[{"__bbox":{"require":[["RelayPrefetchedStreamCache","next",[],["adp_CometMarketplaceSearchContentContainerQueryRelayPreloade
-# nested structure (title type): object {} -> require [] -> 0 [] -> 3 [] -> 0 {} -> __bbox {} -> require [] -> 0 [] -> 3 [] -> 1 {1} -> __bbox {3} -> result {2} -> data {3} -> marketplace_search {1} -> feed_units {4} -> edges [24] * data of postings -> 0 {3} -> node {6} -> listing {28}
-# types inside of node 6 that I need below:
-# listingId = id # note we must use https://www.facebook.com/marketplace/item/{listing_id}/ to get the full listing page
-# primaryImage = primary_listing_photo {3} -> image {1} -> uri
-# facebookPrice = listing_price {3} -> amount
-# facebookPriceFormatted = listing_price {3} -> formatted_amount
-# city = location {1} -> reverse_geocode {3} -> city
-# state = location {1} -> reverse_geocode {3} -> state
-# displayName = location {1} -> reverse_geocode {3} -> city_page {2} -> display_name
-# cityLocationCode = location {1} -> reverse_geocode {3} -> city_page {2} -> id
-# facebookTitle = marketplace_listing_title
-# facebookSeller = marketplace_listing_seller {3} -> name
 
 
-class Extract(scrapy.Spider):
-
-    # brought in values
-    query = "shirts"
-    city = "san diego"
-    start_url = f'https://www.facebook.com/marketplace/{city}/search?query={query}&exact=false'
-    seen = 0
-
+class MarketplaceSpider(scrapy.Spider):
     name = "marketplace_spider"
     custom_settings = {
         "USER_AGENT": None,
@@ -37,49 +14,13 @@ class Extract(scrapy.Spider):
         "TWISTED_REACTOR": "twisted.internet.asyncioreactor.AsyncioSelectorReactor",
     }
 
-    # script content from page source
-    script_content = ""
-    payload_content = ""
- 
-    # values we need to extract
-    document_id = ""
-    city_id = ""
-
-    fb_dtsg = ""
-    lsd = ""
-    jazoest = ""
-
-    scale = 2
-    count = 24
-    savedSearchID = None
-    savedSearchQuery = None
-    contextual_data = None
-    shouldIncludePopularSearches = False
-
-    callsite = "COMMERCE_MKTPLACE_WWW"
-    commerce_enable_local_pickup = True
-    commerce_enable_shipping = True
-    commerce_search_and_rp_available = True
-    commerce_search_and_rp_category_id = []
-    commerce_search_and_rp_condition = None
-    commerce_search_and_rp_ctime_days = None
-    filter_location_latitude = 0
-    filter_location_longitude = 0
-    filter_price_lower_bound = 0
-    filter_price_upper_bound = 214748364700
-    filter_radius_km = 0
-
-    browse_context = None
-    contexual_filters = []
-    referral_code = None
-    saved_search_strid = None
-    search_vertical = "C2C"
-    seo_url = None
-    surface = "SEARCH"
-    virtual_contextual_filters = []
-
-    location_id = "category"
-    url = None
+    def __init__(self, query="shirts", city="san diego", max_items=100, *args, **kwargs):
+        super(MarketplaceSpider, self).__init__(*args, **kwargs)
+        self.query = query
+        self.city = city
+        self.start_url = f'https://www.facebook.com/marketplace/{city}/search?query={query}&exact=false'
+        self.max_items = max_items
+        self.seen = 0
 
     def start_requests(self):
         yield scrapy.Request(
@@ -89,234 +30,176 @@ class Extract(scrapy.Spider):
         )
 
     def parse(self, response):
-        print("THIS IS RESPONSE IN PARSE: ", response)
-        # Find script tag with marketplace data
-        raw_lsd = response.headers.get(b'x-fb-lsd')
-        if raw_lsd:
-            self.lsd = raw_lsd.decode()          # turn bytes → str
-        else:
-            self.lsd = None
-        print("THIS IS LSD: ", self.lsd)
-
+        """Initial parse to extract GraphQL data from the page"""
+        # Extract authentication tokens from response headers/body
+        self.lsd = response.headers.get(b'x-fb-lsd', b'').decode()
         self.fb_dtsg = response.xpath('//input[@name="fb_dtsg"]/@value').get()
-        print("THIS IS FB_DTSG: ", self.fb_dtsg)
         self.jazoest = response.xpath('//input[@name="jazoest"]/@value').get()
-        print("THIS IS JAZOEST: ", self.jazoest)
-        script_tags = response.xpath('//script[@type="application/json" and @data-sjs]')
-        self.logger.info(f"Found {len(script_tags)} script tags with type=application/json and data-sjs")
         
-        for script in script_tags:
-            content = script.get()
-            if "marketplace_search" in content:
-                self.script_content = script.xpath('./text()').get()
-                
-            if "filter_location_latitude" in content:
-                self.payload_content = script.xpath('./text()').get()
-                print("THIS IS PAYLOAD CONTENT: ", self.payload_content)
-
-            if (self.script_content and self.payload_content):
-                break
+        # Find script with GraphQL data - more targeted approach
+        script_with_data = response.xpath('//script[@type="application/json" and @data-sjs and contains(., "marketplace_search")]/text()').get()
         
-        if not (self.script_content and self.payload_content):
+        if not script_with_data:
             self.logger.error("Could not find script tag with marketplace data")
             return
             
-        self.setPayload()
-        yield from self.finishParse()
-
-    def setPayload(self):
-        print("THIS IS SET PAYLOAD: ", self.payload_content)
-        json_data = json.loads(self.payload_content)
-        print("SCRIPT_CONTENT HERE", json_data)
-        require = find_object(json_data, 'require')
-        print("THIS IS REQUIRE for setPayload: ", require)
-        __bbox = find_object(require, '__bbox')
-        print("THIS IS __BBOX for setPayload: ")
-        inner_require = find_object(__bbox, 'require')
-        print("THIS IS INNER REQUIRE for setPayload: ", inner_require)
-        expectedPreloaders = find_object(inner_require, 'expectedPreloaders')
-        print("THIS IS EXPECTED PRELOADERS for setPayload: ", expectedPreloaders)
-        variables = find_object(expectedPreloaders, 'variables', self.docId)
-        print("THIS IS VARIABLES for setPayload: ", variables) 
-        self.scale = variables.get('scale', 2)
-        self.count = variables.get('count', 24)
-        self.savedSearchID = variables.get('savedSearchID', None)
-        self.savedSearchQuery = variables.get('savedSearchQuery', None)
-        self.contextual_data = variables.get('contextual_data', None)
-        self.shouldIncludePopularSearches = variables.get('shouldIncludePopularSearches', False)
-        
-
-        params = find_object(variables, 'params')
-        print("THIS IS PARAMS for setPayload: ", params)
-        bqf = find_object(params, 'bqf')
-        print("THIS IS BQF for setPayload: ", bqf)
-        self.callsite = bqf.get('callsite', "COMMERCE_MKTPLACE_WWW")
-        print("THIS IS CALLSITE for setPayload: ", self.callsite)
-
-        browse_request_params = find_object(params, 'browse_request_params')
-        print("THIS IS BROWSER REQUEST PARAMS for setPayload: ", browse_request_params)
-        self.commerce_enable_local_pickup = browse_request_params.get('commerce_enable_local_pickup', True)
-        self.commerce_enable_shipping = browse_request_params.get('commerce_enable_shipping', True)
-        self.commerce_search_and_rp_available = browse_request_params.get('commerce_search_and_rp_available', True)
-        self.commerce_search_and_rp_category_id = browse_request_params.get('commerce_search_and_rp_category_id', [])
-        self.commerce_search_and_rp_condition = browse_request_params.get('commerce_search_and_rp_condition', None)
-        self.commerce_search_and_rp_ctime_days = browse_request_params.get('commerce_search_and_rp_ctime_days', None)
-        self.filter_location_latitude = browse_request_params.get('filter_location_latitude', 0)
-        self.filter_locatiolsn_longitude = browse_request_params.get('filter_location_longitude', 0)
-        self.filter_price_lower_bound = browse_request_params.get('filter_price_lower_bound', 0)
-        self.filter_price_upper_bound = browse_request_params.get('filter_price_upper_bound', 214748364700)
-        self.filter_radius_km = browse_request_params.get('filter_radius_km', 0)
-        
-        custom_request_params = find_object(params, 'custom_request_params')
-        print("THIS IS CUSTOM REQUEST PARAMS for setPayload: ", custom_request_params)
-        self.browse_context = custom_request_params.get('browse_context', None)
-        self.contexual_filters = custom_request_params.get('contexual_filters', [])
-        self.referral_code = custom_request_params.get('referral_code', None)
-        self.saved_search_strid = custom_request_params.get('saved_search_strid', None)
-        self.search_vertical = custom_request_params.get('search_vertical', "C2C")
-        self.seo_url = custom_request_params.get('seo_url', None)
-        self.surface = custom_request_params.get('surface', "SEARCH")
-        self.virtual_contextual_filters = custom_request_params.get('virtual_contextual_filters', [])
-
-        topicPageParams = find_object(variables, 'topicPageParams')
-        print("THIS IS TOPIC PAGE PARAMS for setPayload: ", topicPageParams)
-        self.location_id = topicPageParams.get('location_id', "category")
-        self.url = topicPageParams.get('url', None)
-
-
-
-    def finishParse(self):
-        print("scipt content outside of loop: ",self.script_content)
-        
+        # Parse the script content
         try:
-            # Parse JSON
-            json_data = json.loads(self.script_content)
-            print("json data IN TRY: ", json_data)
+            json_data = json.loads(script_with_data)
             
-            # Direct navigation based on the structure you provided
-            require = json_data.get('require', [])[0][3][0]
-            print("THIS IS REQUIRE: ", require)
-            bbox_item = require.get('__bbox', {})
-            print("THIS IS BBOX ITEM: ", bbox_item)
-            parts = bbox_item.get('require', [])[0][3][0].split('_');
-            self.document_id = parts[2];
-            inner_require = bbox_item.get('require', [])[0][3][1]
-            print("THIS IS INNER REQUIRE: ", inner_require)
-            inner_bbox = inner_require.get('__bbox', {})
-            print("THIS IS INNER BBOX: ", inner_bbox)
-            result_item = inner_bbox.get('result', {})
-            print("THIS IS RESULT ITEM: ", result_item)
-            data_item = result_item.get('data', {})
-            print("THIS IS DATA ITEM: ", data_item)
-            marketplace_search = data_item['marketplace_search']
-            print("THIS IS MARKETPLACE SEARCH: ", marketplace_search)
-            feed_units = marketplace_search.get('feed_units', {})
-            page_info = feed_units.get('page_info', {})
-            print("THIS IS PAGE INFO: ", page_info)
-            end_cursor = page_info.get('end_cursor', None)
-            print("THIS IS END CURSOR: ", end_cursor)
-            viewer = feed_units.get('viewer', {})
-            buy_location = viewer.get('buy_location', {})
-            buy_location_two = buy_location.get('buy_location', {})
-            self.city_id = buy_location_two.get('id', None)
-            print("THIS IS CITY ID: ", self.city_id)
-            location = buy_location_two.get('location', {})
-            print("THIS IS LOCATION: ", location)
-            reverse_geocode = location.get('reverse_geocode', {})
-            self.city = reverse_geocode.get('city', {})
-            print("THIS IS CITY: ", self.city)
-            has_next_page = page_info.get('has_next_page', False)
-            print("THIS IS HAS NEXT PAGE: ", has_next_page)
-
-            edges = feed_units.get('edges', [])
-            print("THIS IS EDGES: ", edges)
-            print ("LENGTH OF EDGES: ", len(edges))
-            # Process each listing
-            for edge in edges:
-                yield self.extract_item(edge)
-
-               # build the next request if there is a next page
-            print("THIS IS PAGE INFO and yeild IN PARSE: ")
-            if self.should_build_next_request(page_info):
-                print("BUILDING NEXT REQUEST")
-                yield from self.build_next_request(end_cursor)
+            # Extract the document ID (needed for GraphQL queries)
+            self.document_id = self.extract_document_id(json_data)
+            if not self.document_id:
+                self.logger.error("Could not extract document ID")
+                return
                 
-        except (json.JSONDecodeError, KeyError, IndexError) as e:
-            self.logger.error(f"Error processing data: {e}")
-            # If there's an error in navigation, yield the raw script for debugging
-            yield {"raw_script": self.script_content[:1000] + "..." if self.script_content else None}
-
-    def parse_graphql_response(self, response):
-        print("THIS IS RESPONSE IN PARSE GRAPHQL RESPONSE: ", response)
-        print("THIS IS HOW MANY SEEN: ", self.seen)
-        try:
-            data = json.loads(response.text).get('data', {})
-            print("THIS IS DATA in parse_graphql_response: ", data)
-            marketplace_search = data.get('marketplace_search', {})
-            feed_units = marketplace_search.get('feed_units', {})
-            edges = feed_units.get('edges', [])
-            page_info = feed_units.get('page_info', {})
-            for edge in edges:
+            # Extract GraphQL variables
+            graphql_data = self.extract_graphql_data(json_data)
+            if not graphql_data:
+                self.logger.error("Could not extract GraphQL data")
+                return
+                
+            # Process initial listings
+            for edge in graphql_data.get("edges", []):
                 yield self.extract_item(edge)
-
-            print("THIS IS PAGE INFO in parse_graphql_response: ", page_info)
-            if self.should_build_next_request(page_info):
-                cursor = page_info.get('end_cursor')
-                yield from self.build_next_request(cursor)
-
+                
+            # Check for pagination
+            page_info = graphql_data.get("page_info", {})
+            if self.should_fetch_more(page_info):
+                yield from self.build_next_request(page_info.get("end_cursor"))
+        
         except json.JSONDecodeError as e:
-            self.logger.error(f"Failed to parse GraphQL response: {e}")
-
-
+            self.logger.error(f"Error parsing JSON: {e}")
+    
+    def extract_document_id(self, json_data):
+        """Extract the GraphQL document ID from the JSON data"""
+        try:
+            # Navigate through the JSON structure to find the document ID
+            require = json_data.get('require', [])
+            if require and len(require) > 0 and len(require[0]) > 3:
+                bbox_item = require[0][3][0]
+                if isinstance(bbox_item, dict) and '__bbox' in bbox_item:
+                    inner_require = bbox_item.get('__bbox', {}).get('require', [])
+                    if inner_require and len(inner_require) > 0 and len(inner_require[0]) > 3:
+                        # The document ID is typically part of the preloader name
+                        preloader_name = inner_require[0][3][0]
+                        if isinstance(preloader_name, str) and "_" in preloader_name:
+                            parts = preloader_name.split('_')
+                            # Usually the document ID is the third part
+                            if len(parts) >= 3:
+                                return parts[2]
+            
+            # Alternative method - look for a direct reference
+            doc_id_paths = [
+                ["require", 0, 3, 0, "__bbox", "require", 0, 3, 0],
+                ["require", 0, 3, 1, "__bbox", "define", 0, 0],
+                ["__bbox", "require", 0, 3, 0]
+            ]
+            
+            for path in doc_id_paths:
+                try:
+                    value = json_data
+                    for key in path:
+                        if isinstance(value, list) and isinstance(key, int) and len(value) > key:
+                            value = value[key]
+                        elif isinstance(value, dict) and key in value:
+                            value = value[key]
+                        else:
+                            value = None
+                            break
+                    
+                    if isinstance(value, str) and "_" in value:
+                        parts = value.split("_")
+                        if len(parts) >= 3 and parts[0] in ["MarketplaceSearch", "CometMarketplace"]:
+                            return parts[2]
+                except (IndexError, KeyError, TypeError):
+                    continue
+                    
+            return None
+        except Exception as e:
+            self.logger.error(f"Error extracting document ID: {e}")
+            return None
+    
+    def extract_graphql_data(self, json_data):
+        """Extract marketplace search data from the JSON"""
+        try:
+            # Try to navigate to the marketplace_search data
+            # This follows the structure you documented in your comments
+            bbox_item = self.find_value_by_path(json_data, ["require", 0, 3, 0, "__bbox"])
+            if not bbox_item:
+                return None
+                
+            inner_require = self.find_value_by_path(bbox_item, ["require", 0, 3, 1, "__bbox"])    
+            if not inner_require:
+                return None
+                
+            result = inner_require.get("result", {})
+            data = result.get("data", {})
+            marketplace_search = data.get("marketplace_search", {})
+            feed_units = marketplace_search.get("feed_units", {})
+            
+            # Extract location data for future requests
+            viewer = feed_units.get("viewer", {})
+            if viewer and "buy_location" in viewer:
+                buy_location = viewer.get("buy_location", {}).get("buy_location", {})
+                self.location_id = buy_location.get("id")
+                location = buy_location.get("location", {})
+                geocode = location.get("reverse_geocode", {})
+                self.filter_location_latitude = location.get("latitude")
+                self.filter_location_longitude = location.get("longitude")
+            
+            return feed_units
+            
+        except (KeyError, IndexError, AttributeError) as e:
+            self.logger.error(f"Error extracting GraphQL data: {e}")
+            return None
+    
+    def find_value_by_path(self, data, path):
+        """Safely navigate a nested structure using a path"""
+        current = data
+        try:
+            for part in path:
+                if isinstance(current, dict) and part in current:
+                    current = current[part]
+                elif isinstance(current, list) and isinstance(part, int) and len(current) > part:
+                    current = current[part]
+                else:
+                    return None
+            return current
+        except (KeyError, IndexError, TypeError):
+            return None
+    
     def build_next_request(self, cursor):
+        """Build a GraphQL request for the next page of results"""
         graphql_url = "https://www.facebook.com/api/graphql/"
-        doc_id = self.document_id
-
+        
+        # Build variables object for the GraphQL query
         variables = {
-            "buyLocation": {
-                "latitude": self.filter_location_latitude,
-                "longitude": self.filter_location_longitude,
-            },
-            "count": self.count,
+            "count": 24,  # Standard page size
             "cursor": cursor,
+            "scale": 2,
             "params": {
                 "bqf": {
-                    "callsite": self.callsite,
+                    "callsite": "COMMERCE_MKTPLACE_WWW",
                     "query": self.query,
                 },
                 "browse_request_params": {
-                    "commerce_enable_local_pickup": self.commerce_enable_local_pickup,
-                    "commerce_enable_shipping": self.commerce_enable_shipping,
-                    "commerce_search_and_rp_available": self.commerce_search_and_rp_available,
-                    "commerce_search_and_rp_category_id": self.commerce_search_and_rp_category_id,
-                    "commerce_search_and_rp_condition": self.commerce_search_and_rp_condition,
-                    "commerce_search_and_rp_ctime_days": self.commerce_search_and_rp_ctime_days,
+                    "commerce_enable_local_pickup": True,
+                    "commerce_enable_shipping": True,
                     "filter_location_latitude": self.filter_location_latitude,
                     "filter_location_longitude": self.filter_location_longitude,
-                    "filter_price_lower_bound": self.filter_price_lower_bound,
-                    "filter_price_upper_bound": self.filter_price_upper_bound,
-                    "filter_radius_km": self.filter_radius_km,
+                    "filter_price_lower_bound": 0,
+                    "filter_price_upper_bound": 214748364700,
+                    "filter_radius_km": 0
                 },
-                'custom_request_params': {
-                    "browse_context": None,
-                    "contextual_filters": [],
-                    "referral_code": None,
-                    "saved_search_strid": None,
+                "custom_request_params": {
                     "search_vertical": "C2C",
-                    "seo_url": None,
-                    "surface": "SEARCH",
-                    "virtual_contextual_filters": []
+                    "surface": "SEARCH"
                 }
             },
             "topicPageParams": {
-                "location_id": self.location_id,
-                "url": self.url
-            },
-            "scale": self.scale,
-            "savedSearchID": self.savedSearchID,
-            "savedSearchQuery": self.savedSearchQuery,
-            "contextual_data": self.contextual_data,
-            "shouldIncludePopularSearches": self.shouldIncludePopularSearches
+                "location_id": self.location_id if hasattr(self, 'location_id') else "category"
+            }
         }
 
         headers = {
@@ -324,31 +207,29 @@ class Extract(scrapy.Spider):
             'Accept': '*/*',
             'Referer': self.start_url,
             'Origin': 'https://www.facebook.com',
-            'User-Agent': 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/135.0.0.0 Safari/537.36',
             'X-FB-Friendly-Name': 'CometMarketplaceSearchContentContainerQuery',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
         }
 
-        if self.lsd:
+        if hasattr(self, 'lsd') and self.lsd:
             headers['X-FB-LSD'] = self.lsd
 
         form_data = {
-        "av": "61569189908839",  # You can replace this with a default value
-        "__user": "61569189908839",  # Same as above
-        "__a": "1",
-        "__req": "a",
-        "dpr": "2",
-        "__ccg": "EXCELLENT",
-        "fb_api_caller_class": "RelayModern",
-        "fb_api_req_friendly_name": "CometMarketplaceSearchContentContainerQuery",
-        "variables": json.dumps(variables),
-        "server_timestamps": "true",
-        "doc_id": doc_id,
-    }
-        print("THIS IS FORM DATA: ", form_data)
+            "__a": "1",
+            "__req": "a",
+            "fb_api_caller_class": "RelayModern",
+            "fb_api_req_friendly_name": "CometMarketplaceSearchContentContainerQuery",
+            "variables": json.dumps(variables),
+            "server_timestamps": "true",
+            "doc_id": self.document_id,
+        }
+        
+        if hasattr(self, 'fb_dtsg') and self.fb_dtsg:
+            form_data["fb_dtsg"] = self.fb_dtsg
+            
+        if hasattr(self, 'jazoest') and self.jazoest:
+            form_data["jazoest"] = self.jazoest
 
+        self.logger.info(f"Requesting next page with cursor: {cursor[:20]}...")
         return [scrapy.FormRequest(
             url=graphql_url,
             formdata=form_data,
@@ -358,17 +239,68 @@ class Extract(scrapy.Spider):
             meta={"impersonate": "firefox135"}
         )]
     
-    def should_build_next_request(self, page_info):
-        return self.seen < 100 and page_info.get('has_next_page', False) and page_info.get('end_cursor', None)
+    def parse_graphql_response(self, response):
+        """Parse subsequent GraphQL responses"""
+        try:
+            # GraphQL responses are usually JSON
+            response_text = response.text
+            
+            # Some GraphQL responses have a prefix we need to remove
+            if response_text.startswith("for (;;);"):
+                response_text = response_text[9:]
+                
+            data = json.loads(response_text)
+            
+            # Navigate to the actual data
+            marketplace_data = None
+            if "data" in data:
+                marketplace_data = data["data"].get("marketplace_search", {}).get("feed_units", {})
+            else:
+                # Try to find data in a different structure
+                for key, value in data.items():
+                    if isinstance(value, dict) and "data" in value:
+                        if "marketplace_search" in value["data"]:
+                            marketplace_data = value["data"]["marketplace_search"].get("feed_units", {})
+                            break
+            
+            if not marketplace_data:
+                self.logger.error("Could not find marketplace data in response")
+                return
+                
+            # Process listings
+            edges = marketplace_data.get("edges", [])
+            for edge in edges:
+                yield self.extract_item(edge)
+                
+            # Check for pagination
+            page_info = marketplace_data.get("page_info", {})
+            if self.should_fetch_more(page_info):
+                yield from self.build_next_request(page_info.get("end_cursor"))
+                
+        except json.JSONDecodeError as e:
+            self.logger.error(f"Error parsing GraphQL response: {e}")
+            self.logger.debug(f"Response preview: {response.text[:200]}...")
+    
+    def should_fetch_more(self, page_info):
+        """Determine if we should fetch more results"""
+        return (
+            self.seen < self.max_items and 
+            page_info and 
+            page_info.get("has_next_page", False) and 
+            page_info.get("end_cursor")
+        )
     
     def extract_item(self, edge):
-        node = edge.get('node', {})
-        print("THIS IS NODE: ", node)
-        listing = node.get('listing', {})
-        print("THIS IS LISTING: ", listing)
-        self.seen += 1;
-                
-                # Extract specific fields
+        """Extract item details from an edge"""
+        self.seen += 1
+        
+        node = edge.get("node", {})
+        listing = node.get("listing", {})
+        
+        if not listing:
+            return None
+            
+        # Extract all the fields we need
         return {
             'listing_id': listing.get('id'),
             'title': listing.get('marketplace_listing_title'),
@@ -379,42 +311,22 @@ class Extract(scrapy.Spider):
             'state': listing.get('location', {}).get('reverse_geocode', {}).get('state'),
             'display_name': listing.get('location', {}).get('reverse_geocode', {}).get('city_page', {}).get('display_name'),
             'city_code': listing.get('location', {}).get('reverse_geocode', {}).get('city_page', {}).get('id'),
+            'seller': listing.get('marketplace_listing_seller', {}).get('name'),
         }
-    
-    def find_object(self, current, target):
-        # Base case: if current is a dictionary, check if target is a key
-        if isinstance(current, dict):
-            if target in current:
-                return current[target]
-            # If not found directly, check each value
-            for value in current.values():
-                found = self.find_object(value, target)
-                if found is not None:
-                    return found
-        
-        # Handle array/list cases
-        elif isinstance(current, list):
-            for item in current:
-                found = self.find_object(item, target)
-                if found is not None:
-                    return found
-        
-        # Target not found in this branch
-        return None
 
 
 if __name__ == "__main__":
     process = CrawlerProcess(
         settings={
             "FEEDS": {
-                "postings.json": {
+                "marketplace_items.json": {
                     "format": "json",
-                    "append": True,
+                    "encoding": "utf8",
+                    "indent": 4
                 }
-            }
+            },
+            "LOG_LEVEL": "INFO"
         }
     )
-    process.crawl(Extract)
+    process.crawl(MarketplaceSpider, query="shirts", city="san diego", max_items=100)
     process.start()
-
-# 

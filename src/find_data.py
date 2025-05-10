@@ -58,7 +58,7 @@ def find_object(current, target, path=None):
     try:
         # If it's a dict, check for target key then recurse into values
         if isinstance(current, dict):
-            if target in current && :
+            if target in current:
                 logger.debug(f"Found `{target}` at path: {path}. This is current: {current}")
                 return current[target]
 

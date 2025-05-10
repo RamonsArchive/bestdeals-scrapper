@@ -1,0 +1,1 @@
+# parse html json pydantic model attrs class
